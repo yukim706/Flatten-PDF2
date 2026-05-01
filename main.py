@@ -42,14 +42,16 @@ drive = build("drive", "v3", credentials=creds)
 try:
     log_sheet = sh.worksheet(LOG_SHEET_NAME)
 except gspread.exceptions.WorksheetNotFound:
-    log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=3)
+    log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=4)
 
-if log_sheet.row_values(1) == []:
-    log_sheet.append_row(["日時（JST）", "アクション", "詳細"])
+# B1にヘッダーが空なら書き込む（A列は空欄、B列からスタート）
+if log_sheet.acell("B1").value in [None, ""]:
+    log_sheet.append_row(["", "日時（JST）", "アクション", "詳細"])
 
 def log(action, memo=""):
+    # A列は空欄にしてB列から記録（B2スタート）
     now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
-    log_sheet.append_row([now, action, memo])
+    log_sheet.append_row(["", now, action, memo])
     print(f"[{now}] {action} | {memo}")
 
 # ========================
