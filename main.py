@@ -35,14 +35,29 @@ creds = Credentials.from_service_account_info(
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
-log_sheet = sh.worksheet(LOG_SHEET_NAME)
+
+# ========================
+# ログシート取得（なければ自動作成）
+# ========================
+try:
+    log_sheet = sh.worksheet(LOG_SHEET_NAME)
+except gspread.exceptions.WorksheetNotFound:
+    log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=10)
+    log_sheet.append_row(["日時", "種別", "内容"])
+
 drive = build("drive", "v3", credentials=creds)
 
 def log(action, memo=""):
     log_sheet.append_row([now, action, memo])
 
+# ========================
+# 処理開始ログ
+# ========================
 log("開始", "PDFフラット化（再帰・圧縮）")
 
+# ========================
+# PDF一覧を再帰取得
+# ========================
 def list_pdfs_recursive(folder_id):
     pdfs = []
     q = f"'{folder_id}' in parents and trashed=false"
@@ -58,6 +73,9 @@ def list_pdfs_recursive(folder_id):
             pdfs.extend(list_pdfs_recursive(f["id"]))
     return pdfs
 
+# ========================
+# PDFフラット化
+# ========================
 def flatten_pdf(input_path, output_path):
     src = fitz.open(input_path)
     dst = fitz.open()
@@ -83,7 +101,7 @@ folder_url = sh.sheet1.acell(CELL).value
 match = re.search(r"folders/([a-zA-Z0-9_-]+)", folder_url)
 if not match:
     log("失敗", "フォルダURL不正")
-    raise ValueError("フォルダURLが不正")
+    raise ValueError("フォルダURLが不正です")
 
 root_folder_id = match.group(1)
 all_pdfs = list_pdfs_recursive(root_folder_id)
@@ -93,6 +111,9 @@ log("情報", f"検出PDF総数: {len(all_pdfs)}")
 os.makedirs(WORK_DIR, exist_ok=True)
 done = 0
 
+# ========================
+# PDF 処理ループ
+# ========================
 for pdf in all_pdfs:
     file_id = pdf["id"]
     name = pdf["name"]
@@ -128,5 +149,8 @@ for pdf in all_pdfs:
     os.remove(in_p)
     os.remove(out_p)
 
+# ========================
+# 完了ログ
+# ========================
 log("成功", f"{done} 件処理完了")
 print("✅ 完了")
