@@ -72,7 +72,7 @@ if not log_sheet.acell("A1").value:
     log_sheet.append_row(headers)
 
 # ========================
-# ログ整理
+# ログ行数が多くなったらリセット
 # ========================
 def reset_log_if_needed():
     MAX_ROWS = 50000
@@ -86,7 +86,7 @@ def reset_log_if_needed():
     log_sheet.update("A1", [headers])
 
 # ========================
-# ログ出力
+# ログ出力（確実に書く版）
 # ========================
 def log(action, filename="", before_mb="", after_mb="", rate="", seconds="", memo=""):
     try:
@@ -114,7 +114,7 @@ def log(action, filename="", before_mb="", after_mb="", rate="", seconds="", mem
         print("LOG ERROR:", e)
 
 # ========================
-# PDF一覧（再帰・全件）
+# PDF一覧を再帰取得
 # ========================
 def list_pdfs_recursive(folder_id):
     pdfs = []
@@ -162,7 +162,7 @@ def flatten_pdf(input_path, output_path):
     dst.close()
 
 # ========================
-# 開始
+# 開始ログ
 # ========================
 start_time = datetime.now(JST)
 log("開始", memo="PDFフラット化（再帰・圧縮）")
@@ -212,10 +212,21 @@ for pdf in all_pdfs:
         rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
         media = MediaFileUpload(out_p, mimetype="application/pdf")
-        drive.files().update(fileId=file_id, media_body=media).execute()
+        drive.files().update(
+            fileId=file_id,
+            media_body=media,
+        ).execute()
 
         sec = round((datetime.now(JST) - t0).total_seconds(), 2)
-        log("処理", name, before_mb, after_mb, rate, sec)
+
+        log(
+            "処理",
+            name,
+            before_mb,
+            after_mb,
+            rate,
+            sec,
+        )
 
         done += 1
 
@@ -228,7 +239,7 @@ for pdf in all_pdfs:
                 os.remove(p)
 
 # ========================
-# 完了
+# 完了ログ
 # ========================
 total_sec = round((datetime.now(JST) - start_time).total_seconds(), 1)
 log("成功", seconds=total_sec, memo=f"{done} 件処理完了")
