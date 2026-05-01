@@ -2,7 +2,7 @@ import os
 import re
 import json
 import fitz  # PyMuPDF
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -20,7 +20,10 @@ DPI = 200
 WORK_DIR = "./pdf_work"
 LOG_SHEET_NAME = "ログ"
 
-now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# ========================
+# 日本時間（JST）
+# ========================
+JST = timezone(timedelta(hours=9))
 
 # ========================
 # Service Account
@@ -35,14 +38,86 @@ creds = Credentials.from_service_account_info(
 
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
-log_sheet = sh.worksheet(LOG_SHEET_NAME)
 drive = build("drive", "v3", credentials=creds)
 
-def log(action, memo=""):
-    log_sheet.append_row([now, action, memo])
+# ========================
+# ログシート初期化（初回のみ）
+# ========================
+headers = [
+    "日時",
+    "種別",
+    "ファイル名",
+    "元サイズ(MB)",
+    "後サイズ(MB)",
+    "圧縮率(%)",
+    "処理秒数",
+    "メモ",
+]
 
-log("開始", "PDFフラット化（再帰・圧縮）")
+try:
+    log_sheet = sh.worksheet(LOG_SHEET_NAME)
+except gspread.WorksheetNotFound:
+    log_sheet = sh.add_worksheet(
+        title=LOG_SHEET_NAME,
+        rows=1000,
+        cols=len(headers),
+    )
 
+# ヘッダーが無ければ追加（初回のみ）
+if not log_sheet.acell("A1").value:
+    log_sheet.append_row(headers)
+
+# ========================
+# 5万行超えたら全消去
+# ========================
+def reset_log_if_needed():
+    MAX_ROWS = 50000
+
+    used_rows = len(log_sheet.get_all_values()) - 1  # ヘッダー除外
+    if used_rows <= MAX_ROWS:
+        return
+
+    headers = log_sheet.row_values(1)
+    log_sheet.clear()
+    log_sheet.resize(rows=1)
+    log_sheet.update("A1", [headers])
+
+# ========================
+# ログ出力（日時型）
+# ========================
+def log(
+    action,
+    filename="",
+    before_mb="",
+    after_mb="",
+    rate="",
+    seconds="",
+    memo=""
+):
+    reset_log_if_needed()
+
+    now = datetime.now(JST)
+
+    # 行数が足りなければ自動追加
+    current_rows = log_sheet.row_count
+    last_row = len(log_sheet.get_all_values())
+    if current_rows - last_row < 10:
+        log_sheet.add_rows(1000)
+
+    log_sheet.append_row([
+        now,
+        action,
+        filename,
+        before_mb,
+        after_mb,
+        rate,
+        seconds,
+        memo,
+    ])
+
+# ========================
+# PDF一覧を再帰取得
+# ========================
 def list_pdfs_recursive(folder_id):
     pdfs = []
     q = f"'{folder_id}' in parents and trashed=false"
@@ -58,6 +133,9 @@ def list_pdfs_recursive(folder_id):
             pdfs.extend(list_pdfs_recursive(f["id"]))
     return pdfs
 
+# ========================
+# PDFフラット化
+# ========================
 def flatten_pdf(input_path, output_path):
     src = fitz.open(input_path)
     dst = fitz.open()
@@ -77,57 +155,87 @@ def flatten_pdf(input_path, output_path):
     dst.close()
 
 # ========================
+# 開始ログ
+# ========================
+start_time = datetime.now(JST)
+log("開始", memo="PDFフラット化（再帰・圧縮）")
+
+# ========================
 # フォルダID取得
 # ========================
 folder_url = sh.sheet1.acell(CELL).value
 match = re.search(r"folders/([a-zA-Z0-9_-]+)", folder_url)
 if not match:
-    log("失敗", "フォルダURL不正")
+    log("失敗", memo="フォルダURL不正")
     raise ValueError("フォルダURLが不正")
 
 root_folder_id = match.group(1)
 all_pdfs = list_pdfs_recursive(root_folder_id)
+log("情報", memo=f"検出PDF総数: {len(all_pdfs)}")
 
-log("情報", f"検出PDF総数: {len(all_pdfs)}")
-
+# ========================
+# PDF処理
+# ========================
 os.makedirs(WORK_DIR, exist_ok=True)
 done = 0
 
 for pdf in all_pdfs:
-    file_id = pdf["id"]
-    name = pdf["name"]
-    before = int(pdf.get("size", 0))
-
+    t0 = datetime.now(JST)
     in_p = os.path.join(WORK_DIR, "in.pdf")
     out_p = os.path.join(WORK_DIR, "out.pdf")
 
-    req = drive.files().get_media(fileId=file_id)
-    with open(in_p, "wb") as f:
-        downloader = MediaIoBaseDownload(f, req)
-        done_dl = False
-        while not done_dl:
-            _, done_dl = downloader.next_chunk()
+    try:
+        file_id = pdf["id"]
+        name = pdf["name"]
+        before = int(pdf.get("size", 0))
 
-    flatten_pdf(in_p, out_p)
-    after = os.path.getsize(out_p)
+        # ダウンロード
+        req = drive.files().get_media(fileId=file_id)
+        with open(in_p, "wb") as f:
+            downloader = MediaIoBaseDownload(f, req)
+            done_dl = False
+            while not done_dl:
+                _, done_dl = downloader.next_chunk()
 
-    rate = round((1 - after / before) * 100, 1) if before > 0 else 0
+        # フラット化
+        flatten_pdf(in_p, out_p)
+        after = os.path.getsize(out_p)
 
-    media = MediaFileUpload(out_p, mimetype="application/pdf")
-    drive.files().update(
-        fileId=file_id,
-        media_body=media,
-    ).execute()
+        before_mb = round(before / 1024 / 1024, 2)
+        after_mb = round(after / 1024 / 1024, 2)
+        rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
-    done += 1
-    log(
-        "処理",
-        f"{name} → {round(before/1024/1024,1)}MB → {round(after/1024/1024,1)}MB（{rate}%）",
-    )
+        # 上書きアップロード
+        media = MediaFileUpload(out_p, mimetype="application/pdf")
+        drive.files().update(
+            fileId=file_id,
+            media_body=media,
+        ).execute()
 
-    os.remove(in_p)
-    os.remove(out_p)
+        sec = round((datetime.now(JST) - t0).total_seconds(), 2)
 
-log("成功", f"{done} 件処理完了")
+        log(
+            action="処理",
+            filename=name,
+            before_mb=before_mb,
+            after_mb=after_mb,
+            rate=rate,
+            seconds=sec,
+        )
+        done += 1
+
+    except Exception as e:
+        log("失敗", filename=name, memo=str(e))
+
+    finally:
+        for p in (in_p, out_p):
+            if os.path.exists(p):
+                os.remove(p)
+
+# ========================
+# 完了ログ
+# ========================
+total_sec = round((datetime.now(JST) - start_time).total_seconds(), 1)
+log("成功", seconds=total_sec, memo=f"{done} 件処理完了")
+
 print("✅ 完了")
-
