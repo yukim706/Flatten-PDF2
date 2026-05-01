@@ -2,7 +2,6 @@ name: PDF処理アクション（完全自動）
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: '10 20 * * *'  # JST 05:10
     - cron: '10 3 * * *'   # JST 12:10
@@ -19,12 +18,14 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - run: pip install pymupdf gspread google-api-python-client
+      - name: install deps
+        run: |
+          pip install pymupdf gspread google-api-python-client
 
-      - run: python main.py
+      - name: run main
         env:
-          GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+          GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-
+        run: python main.py
