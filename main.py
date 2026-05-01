@@ -41,7 +41,7 @@ sh = gc.open_by_key(SPREADSHEET_ID)
 drive = build("drive", "v3", credentials=creds)
 
 # ========================
-# ログシート初期化（初回のみ）
+# ログシート初期化
 # ========================
 headers = [
     "日時",
@@ -67,23 +67,12 @@ if not log_sheet.acell("A1").value:
     log_sheet.append_row(headers)
 
 # ========================
-# datetime → Sheets日時シリアル変換
-# ========================
-def datetime_to_sheet_serial(dt):
-    """
-    Python datetime → Google Sheets 日時シリアル値
-    """
-    epoch = datetime(1899, 12, 30, tzinfo=dt.tzinfo)
-    delta = dt - epoch
-    return delta.days + delta.seconds / 86400
-
-# ========================
-# 5万行超えたら全消去
+# ログ行数が多すぎたらリセット
 # ========================
 def reset_log_if_needed():
     MAX_ROWS = 50000
-    used_rows = len(log_sheet.get_all_values()) - 1  # ヘッダー除外
-    if used_rows <= MAX_ROWS:
+    rows = len(log_sheet.get_all_values()) - 1
+    if rows <= MAX_ROWS:
         return
 
     headers = log_sheet.row_values(1)
@@ -92,53 +81,57 @@ def reset_log_if_needed():
     log_sheet.update("A1", [headers])
 
 # ========================
-# ログ出力（安全版）
+# ログ出力（確実版）
 # ========================
-def log(
-    action,
-    filename="",
-    before_mb="",
-    after_mb="",
-    rate="",
-    seconds="",
-    memo=""
-):
-    reset_log_if_needed()
+def log(action, filename="", before_mb="", after_mb="", rate="", seconds="", memo=""):
+    try:
+        reset_log_if_needed()
 
-    now = datetime.now(JST)
-    now_serial = datetime_to_sheet_serial(now)
+        now_str = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 行数が足りなければ拡張
-    if log_sheet.row_count - len(log_sheet.get_all_values()) < 10:
-        log_sheet.add_rows(1000)
+        if log_sheet.row_count - len(log_sheet.get_all_values()) < 10:
+            log_sheet.add_rows(1000)
 
-    log_sheet.append_row([
-        now_serial,
-        action,
-        filename,
-        before_mb,
-        after_mb,
-        rate,
-        seconds,
-        memo,
-    ])
+        log_sheet.append_row(
+            [
+                now_str,
+                action,
+                filename,
+                before_mb,
+                after_mb,
+                rate,
+                seconds,
+                memo,
+            ],
+            value_input_option="USER_ENTERED",
+        )
+    except Exception as e:
+        print("LOG ERROR:", e)
 
 # ========================
-# PDF一覧を再帰取得
+# PDF一覧を再帰取得（ページネーション対応）
 # ========================
 def list_pdfs_recursive(folder_id):
     pdfs = []
-    q = f"'{folder_id}' in parents and trashed=false"
-    res = drive.files().list(
-        q=q,
-        fields="files(id, name, mimeType, size)",
-    ).execute()
+    page_token = None
 
-    for f in res.get("files", []):
-        if f["mimeType"] == "application/pdf":
-            pdfs.append(f)
-        elif f["mimeType"] == "application/vnd.google-apps.folder":
-            pdfs.extend(list_pdfs_recursive(f["id"]))
+    while True:
+        res = drive.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="nextPageToken, files(id, name, mimeType, size)",
+            pageToken=page_token,
+        ).execute()
+
+        for f in res.get("files", []):
+            if f["mimeType"] == "application/pdf":
+                pdfs.append(f)
+            elif f["mimeType"] == "application/vnd.google-apps.folder":
+                pdfs.extend(list_pdfs_recursive(f["id"]))
+
+        page_token = res.get("nextPageToken")
+        if not page_token:
+            break
+
     return pdfs
 
 # ========================
@@ -152,6 +145,7 @@ def flatten_pdf(input_path, output_path):
         rect = page.rect
         mat = fitz.Matrix(DPI / 72, DPI / 72)
         pix = page.get_pixmap(matrix=mat, annots=True, alpha=False)
+
         new_page = dst.new_page(width=rect.width, height=rect.height)
         new_page.insert_image(rect, pixmap=pix)
 
@@ -175,7 +169,7 @@ folder_url = sh.sheet1.acell(CELL).value
 match = re.search(r"folders/([a-zA-Z0-9_-]+)", folder_url)
 if not match:
     log("失敗", memo="フォルダURL不正")
-    raise ValueError("フォルダURLが不正")
+    raise ValueError("フォルダURLが不正です")
 
 root_folder_id = match.group(1)
 all_pdfs = list_pdfs_recursive(root_folder_id)
@@ -189,12 +183,13 @@ done = 0
 
 for pdf in all_pdfs:
     t0 = datetime.now(JST)
-    in_p = os.path.join(WORK_DIR, "in.pdf")
-    out_p = os.path.join(WORK_DIR, "out.pdf")
+    file_id = pdf["id"]
+    name = pdf["name"]
+
+    in_p = os.path.join(WORK_DIR, f"{file_id}_in.pdf")
+    out_p = os.path.join(WORK_DIR, f"{file_id}_out.pdf")
 
     try:
-        file_id = pdf["id"]
-        name = pdf["name"]
         before = int(pdf.get("size", 0))
 
         # ダウンロード
@@ -213,22 +208,21 @@ for pdf in all_pdfs:
         after_mb = round(after / 1024 / 1024, 2)
         rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
+        # 上書き
         media = MediaFileUpload(out_p, mimetype="application/pdf")
-        drive.files().update(
-            fileId=file_id,
-            media_body=media,
-        ).execute()
+        drive.files().update(fileId=file_id, media_body=media).execute()
 
         sec = round((datetime.now(JST) - t0).total_seconds(), 2)
 
         log(
-            action="処理",
+            "処理",
             filename=name,
             before_mb=before_mb,
             after_mb=after_mb,
             rate=rate,
             seconds=sec,
         )
+
         done += 1
 
     except Exception as e:
