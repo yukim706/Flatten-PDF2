@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64
 import fitz  # PyMuPDF
 from datetime import datetime, timezone, timedelta
 import gspread
@@ -26,10 +27,14 @@ LOG_SHEET_NAME = "ログ"
 JST = timezone(timedelta(hours=9))
 
 # ========================
-# Service Account
+# Service Account（base64）
 # ========================
 creds = Credentials.from_service_account_info(
-    json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"]),
+    json.loads(
+        base64.b64decode(
+            os.environ["GOOGLE_SERVICE_ACCOUNT_B64"]
+        ).decode("utf-8")
+    ),
     scopes=[
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -67,7 +72,7 @@ if not log_sheet.acell("A1").value:
     log_sheet.append_row(headers)
 
 # ========================
-# ログ行数が多すぎたらリセット
+# ログ整理
 # ========================
 def reset_log_if_needed():
     MAX_ROWS = 50000
@@ -81,7 +86,7 @@ def reset_log_if_needed():
     log_sheet.update("A1", [headers])
 
 # ========================
-# ログ出力（確実版）
+# ログ出力
 # ========================
 def log(action, filename="", before_mb="", after_mb="", rate="", seconds="", memo=""):
     try:
@@ -109,7 +114,7 @@ def log(action, filename="", before_mb="", after_mb="", rate="", seconds="", mem
         print("LOG ERROR:", e)
 
 # ========================
-# PDF一覧を再帰取得（ページネーション対応）
+# PDF一覧（再帰・全件）
 # ========================
 def list_pdfs_recursive(folder_id):
     pdfs = []
@@ -157,7 +162,7 @@ def flatten_pdf(input_path, output_path):
     dst.close()
 
 # ========================
-# 開始ログ
+# 開始
 # ========================
 start_time = datetime.now(JST)
 log("開始", memo="PDFフラット化（再帰・圧縮）")
@@ -169,7 +174,7 @@ folder_url = sh.sheet1.acell(CELL).value
 match = re.search(r"folders/([a-zA-Z0-9_-]+)", folder_url)
 if not match:
     log("失敗", memo="フォルダURL不正")
-    raise ValueError("フォルダURLが不正です")
+    raise ValueError("フォルダURL不正")
 
 root_folder_id = match.group(1)
 all_pdfs = list_pdfs_recursive(root_folder_id)
@@ -192,7 +197,6 @@ for pdf in all_pdfs:
     try:
         before = int(pdf.get("size", 0))
 
-        # ダウンロード
         req = drive.files().get_media(fileId=file_id)
         with open(in_p, "wb") as f:
             downloader = MediaIoBaseDownload(f, req)
@@ -200,7 +204,6 @@ for pdf in all_pdfs:
             while not done_dl:
                 _, done_dl = downloader.next_chunk()
 
-        # フラット化
         flatten_pdf(in_p, out_p)
         after = os.path.getsize(out_p)
 
@@ -208,25 +211,16 @@ for pdf in all_pdfs:
         after_mb = round(after / 1024 / 1024, 2)
         rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
-        # 上書き
         media = MediaFileUpload(out_p, mimetype="application/pdf")
         drive.files().update(fileId=file_id, media_body=media).execute()
 
         sec = round((datetime.now(JST) - t0).total_seconds(), 2)
-
-        log(
-            "処理",
-            filename=name,
-            before_mb=before_mb,
-            after_mb=after_mb,
-            rate=rate,
-            seconds=sec,
-        )
+        log("処理", name, before_mb, after_mb, rate, sec)
 
         done += 1
 
     except Exception as e:
-        log("失敗", filename=name, memo=str(e))
+        log("失敗", name, memo=str(e))
 
     finally:
         for p in (in_p, out_p):
@@ -234,7 +228,7 @@ for pdf in all_pdfs:
                 os.remove(p)
 
 # ========================
-# 完了ログ
+# 完了
 # ========================
 total_sec = round((datetime.now(JST) - start_time).total_seconds(), 1)
 log("成功", seconds=total_sec, memo=f"{done} 件処理完了")
