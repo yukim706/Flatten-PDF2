@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64
 import fitz  # PyMuPDF
 from datetime import datetime
 
@@ -21,11 +22,11 @@ DPI = 200
 WORK_DIR = "./pdf_work"
 LOG_SHEET_NAME = "ログ"
 
-# ✅ GitHub Actions 安全対策
+# GitHub Actions 安全対策
 MAX_PROCESS = int(os.environ.get("MAX_PROCESS", "200"))
 TIMEOUT_SEC = int(os.environ.get("JOB_TIMEOUT_SEC", "3300"))
 
-# ✅ フラット化済み判定（ファイル名は使わない）
+# フラット化済み判定キー
 FLATTEN_PROP_KEY = "flattened"
 
 # ========================
@@ -34,10 +35,14 @@ FLATTEN_PROP_KEY = "flattened"
 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ========================
-# Service Account（変更なし）
+# Service Account（B64版・必須修正点）
 # ========================
 creds = Credentials.from_service_account_info(
-    json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"]),
+    json.loads(
+        base64.b64decode(
+            os.environ["GOOGLE_SERVICE_ACCOUNT_B64"]
+        ).decode("utf-8")
+    ),
     scopes=[
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -60,15 +65,14 @@ def log(action, memo=""):
 # ========================
 # 開始ログ
 # ========================
-log("開始", "PDFフラット化（appProperties判定・再実行安全）")
+log("開始", "PDFフラット化（再帰・圧縮）")
 
 # ========================
-# PDF一覧を再帰取得（appProperties 含む）
+# PDF一覧取得（再帰）
 # ========================
 def list_pdfs_recursive(folder_id):
     pdfs = []
     q = f"'{folder_id}' in parents and trashed=false"
-
     res = drive.files().list(
         q=q,
         fields="files(id, name, mimeType, size, appProperties)",
@@ -79,7 +83,6 @@ def list_pdfs_recursive(folder_id):
             pdfs.append(f)
         elif f["mimeType"] == "application/vnd.google-apps.folder":
             pdfs.extend(list_pdfs_recursive(f["id"]))
-
     return pdfs
 
 # ========================
@@ -93,7 +96,6 @@ def flatten_pdf(input_path, output_path):
         rect = page.rect
         mat = fitz.Matrix(DPI / 72, DPI / 72)
         pix = page.get_pixmap(matrix=mat, annots=True, alpha=False)
-
         new_page = dst.new_page(width=rect.width, height=rect.height)
         new_page.insert_image(rect, pixmap=pix)
 
@@ -136,7 +138,7 @@ for pdf in all_pdfs:
     name = pdf["name"]
     before = int(pdf.get("size", 0))
 
-    # ✅ appProperties でスキップ判定（名前は見ない）
+    # フラット化済みスキップ
     props = pdf.get("appProperties", {})
     if props.get(FLATTEN_PROP_KEY) == "true":
         log("スキップ", f"{name}（既にフラット化済み）")
@@ -165,9 +167,7 @@ for pdf in all_pdfs:
             fileId=file_id,
             media_body=media,
             body={
-                "appProperties": {
-                    FLATTEN_PROP_KEY: "true"
-                }
+                "appProperties": {FLATTEN_PROP_KEY: "true"}
             },
         ).execute()
 
