@@ -29,12 +29,12 @@ TIMEOUT_SEC = int(os.environ.get("JOB_TIMEOUT_SEC", "3300"))
 FLATTEN_PROP_KEY = "flattened"
 
 # ========================
-# 時刻（あなたの方式）
+# 時刻（参照コードと同一）
 # ========================
 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ========================
-# Service Account（あなたの方式）
+# Service Account（変更なし）
 # ========================
 creds = Credentials.from_service_account_info(
     json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"]),
@@ -52,7 +52,7 @@ drive = build("drive", "v3", credentials=creds)
 print("WRITE TO SPREADSHEET:", sh.title)
 
 # ========================
-# ログ関数（完全同一）
+# ログ関数（参照コードと完全一致）
 # ========================
 def log(action, memo=""):
     log_sheet.append_row([now, action, memo])
