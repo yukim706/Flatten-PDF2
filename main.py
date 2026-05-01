@@ -63,16 +63,25 @@ except gspread.WorksheetNotFound:
         cols=len(headers),
     )
 
-# ヘッダーが無ければ追加（初回のみ）
 if not log_sheet.acell("A1").value:
     log_sheet.append_row(headers)
+
+# ========================
+# datetime → Sheets日時シリアル変換
+# ========================
+def datetime_to_sheet_serial(dt):
+    """
+    Python datetime → Google Sheets 日時シリアル値
+    """
+    epoch = datetime(1899, 12, 30, tzinfo=dt.tzinfo)
+    delta = dt - epoch
+    return delta.days + delta.seconds / 86400
 
 # ========================
 # 5万行超えたら全消去
 # ========================
 def reset_log_if_needed():
     MAX_ROWS = 50000
-
     used_rows = len(log_sheet.get_all_values()) - 1  # ヘッダー除外
     if used_rows <= MAX_ROWS:
         return
@@ -83,7 +92,7 @@ def reset_log_if_needed():
     log_sheet.update("A1", [headers])
 
 # ========================
-# ログ出力（日時型）
+# ログ出力（安全版）
 # ========================
 def log(
     action,
@@ -97,15 +106,14 @@ def log(
     reset_log_if_needed()
 
     now = datetime.now(JST)
+    now_serial = datetime_to_sheet_serial(now)
 
-    # 行数が足りなければ自動追加
-    current_rows = log_sheet.row_count
-    last_row = len(log_sheet.get_all_values())
-    if current_rows - last_row < 10:
+    # 行数が足りなければ拡張
+    if log_sheet.row_count - len(log_sheet.get_all_values()) < 10:
         log_sheet.add_rows(1000)
 
     log_sheet.append_row([
-        now,
+        now_serial,
         action,
         filename,
         before_mb,
@@ -205,7 +213,6 @@ for pdf in all_pdfs:
         after_mb = round(after / 1024 / 1024, 2)
         rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
-        # 上書きアップロード
         media = MediaFileUpload(out_p, mimetype="application/pdf")
         drive.files().update(
             fileId=file_id,
