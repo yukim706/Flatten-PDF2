@@ -20,8 +20,6 @@ DPI = 200
 WORK_DIR = "./pdf_work"
 LOG_SHEET_NAME = "ログ"
 
-now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 # ========================
 # Service Account
 # ========================
@@ -36,29 +34,28 @@ creds = Credentials.from_service_account_info(
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
 
-print("=== DEBUG ===")
-print("SPREADSHEET_ID =", SPREADSHEET_ID)
-print("Spreadsheet title =", sh.title)
-print("Spreadsheet URL =", f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit")
-print("================")
-
-
 # ========================
-# ログシート取得（なければ自動作成）
+# ログシート取得（なければ作成）
 # ========================
 try:
     log_sheet = sh.worksheet(LOG_SHEET_NAME)
 except gspread.exceptions.WorksheetNotFound:
-    log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=10)
-    log_sheet.append_row(["日時", "種別", "内容"])
+    log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1, cols=10)
+    log_sheet.insert_row(["日時", "種別", "内容"], 1)
 
 drive = build("drive", "v3", credentials=creds)
 
+# ========================
+# ログ関数（insert_row版）
+# ========================
 def log(action, memo=""):
-    log_sheet.append_row([now, action, memo])
+    log_sheet.insert_row(
+        [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), action, memo],
+        index=2
+    )
 
 # ========================
-# 処理開始ログ
+# 開始ログ
 # ========================
 log("開始", "PDFフラット化（再帰・圧縮）")
 
@@ -138,7 +135,6 @@ for pdf in all_pdfs:
 
     flatten_pdf(in_p, out_p)
     after = os.path.getsize(out_p)
-
     rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
     media = MediaFileUpload(out_p, mimetype="application/pdf")
