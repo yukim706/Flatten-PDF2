@@ -36,6 +36,13 @@ creds = Credentials.from_service_account_info(
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
 
+print("=== DEBUG ===")
+print("SPREADSHEET_ID =", SPREADSHEET_ID)
+print("Spreadsheet title =", sh.title)
+print("Spreadsheet URL =", f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit")
+print("================")
+
+
 # ========================
 # ログシート取得（なければ自動作成）
 # ========================
