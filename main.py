@@ -1,7 +1,7 @@
 import os
 import re
 import json
-import fitz  # PyMuPDF
+import fitz
 from datetime import datetime, timezone, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
@@ -19,7 +19,7 @@ CELL = "F4"
 DPI = 200
 WORK_DIR = "./pdf_work"
 LOG_SHEET_NAME = "ログ"
-JST = timezone(timedelta(hours=9))  # 日本時間（UTC+9）
+JST = timezone(timedelta(hours=9))
 
 # ========================
 # Service Account 認証
@@ -32,7 +32,7 @@ creds = Credentials.from_service_account_info(
     ],
 )
 
-gc = gspread.Client(auth=creds)          # gspread 6.x 対応
+gc = gspread.Client(auth=creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
 drive = build("drive", "v3", credentials=creds)
 
@@ -44,12 +44,10 @@ try:
 except gspread.exceptions.WorksheetNotFound:
     log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=3)
 
-# ヘッダーが空なら書き込む
 if log_sheet.row_values(1) == []:
     log_sheet.append_row(["日時（JST）", "アクション", "詳細"])
 
 def log(action, memo=""):
-    """ログシートに1行追記する（日本時間で記録）"""
     now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
     log_sheet.append_row([now, action, memo])
     print(f"[{now}] {action} | {memo}")
@@ -58,7 +56,6 @@ def log(action, memo=""):
 # PDF処理関数
 # ========================
 def list_pdfs_recursive(folder_id):
-    """フォルダ内のPDFをサブフォルダも含めて再帰的に取得"""
     pdfs = []
     q = f"'{folder_id}' in parents and trashed=false"
     res = drive.files().list(
@@ -73,7 +70,6 @@ def list_pdfs_recursive(folder_id):
     return pdfs
 
 def flatten_pdf(input_path, output_path):
-    """PDFをラスタライズしてアノテーションを焼き込む（ハイパーリンクは保持）"""
     src = fitz.open(input_path)
     dst = fitz.open()
     for page in src:
@@ -94,7 +90,6 @@ def flatten_pdf(input_path, output_path):
 log("開始", "PDFフラット化（再帰・圧縮）")
 
 try:
-    # フォルダID取得
     folder_url = sh.sheet1.acell(CELL).value
     if not folder_url:
         log("失敗", f"セル {CELL} が空です")
@@ -123,7 +118,6 @@ try:
             out_p = os.path.join(WORK_DIR, "out.pdf")
 
             try:
-                # ダウンロード
                 req = drive.files().get_media(fileId=file_id)
                 with open(in_p, "wb") as f:
                     downloader = MediaIoBaseDownload(f, req)
@@ -131,12 +125,10 @@ try:
                     while not done_dl:
                         _, done_dl = downloader.next_chunk()
 
-                # フラット化
                 flatten_pdf(in_p, out_p)
                 after = os.path.getsize(out_p)
                 rate = round((1 - after / before) * 100, 1) if before > 0 else 0
 
-                # アップロード（上書き）
                 media = MediaFileUpload(out_p, mimetype="application/pdf")
                 drive.files().update(
                     fileId=file_id,
