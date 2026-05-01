@@ -24,7 +24,7 @@ jobs:
         run: |
           pip install pymupdf gspread google-api-python-client
 
-      - name: run main
+      - name: run main.py
         env:
           GOOGLE_SERVICE_ACCOUNT_B64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_B64 }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
