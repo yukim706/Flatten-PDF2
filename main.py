@@ -1,3 +1,4 @@
+print("WRITE TO SPREADSHEET:", sh.title)
 import os
 import re
 import json
