@@ -1,19 +1,11 @@
 name: PDF処理アクション（完全自動）
 
 on:
-  # 手動実行（動作確認用）
   workflow_dispatch:
 
-  # 定期実行（UTC指定）
   schedule:
     # 日本時間 6:00〜23:00 を1時間おきに実行
-    # GitHub Actions の cron は「UTC」
-    #
-    # JST → UTC 変換
-    #   06:00 JST = 前日 21:00 UTC
-    #   23:00 JST = 当日 14:00 UTC
-    #
-    # 毎日 毎正時（1時間間隔）
+    # GitHub Actions の cron は UTC
     - cron: '0 21-23,0-14 * * *'
 
 jobs:
@@ -21,24 +13,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # リポジトリのコードを取得
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Python環境をセットアップ
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 必要ライブラリをインストール
       - name: Install dependencies
         run: |
           pip install pymupdf gspread google-api-python-client
 
-      # PDF処理スクリプトを実行
       - name: Run PDF processing
         run: python main.py
         env:
+          # Spreadsheet ID は直書き（Secret不要）
+          SPREADSHEET_ID: 1MO5x_WfB3IUU4RlwlcjZzWUbg-CgQT5Yz68qJWYRfT4
+
+          # 認証情報のみ Secret
           GOOGLE_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
