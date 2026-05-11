@@ -24,8 +24,14 @@ JST = timezone(timedelta(hours=9))
 # ========================
 # Service Account 認証
 # ========================
+
+# ① GOOGLE_SERVICE_ACCOUNT の未設定チェック
+_sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT")
+if not _sa_json:
+    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT が設定されていません")
+
 creds = Credentials.from_service_account_info(
-    json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"]),
+    json.loads(_sa_json),
     scopes=[
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -41,12 +47,18 @@ drive = build("drive", "v3", credentials=creds)
 # ========================
 try:
     log_sheet = sh.worksheet(LOG_SHEET_NAME)
+    log_sheet.clear()  # 実行のたびにログをリセット
 except gspread.exceptions.WorksheetNotFound:
-    log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=4)
+    try:
+        # ③ rows を 5000 に拡張（件数増加に備える）
+        log_sheet = sh.add_worksheet(title=LOG_SHEET_NAME, rows=5000, cols=4)
+    except Exception as e:
+        raise RuntimeError(f"ログシートの作成に失敗しました: {e}") from e
+except Exception as e:
+    # ② 503 などの予期しないエラーも捕捉
+    raise RuntimeError(f"ログシートの初期化に失敗しました: {e}") from e
 
-# B1にヘッダーが空なら書き込む（A列は空欄、B列からスタート）
-if log_sheet.acell("B1").value in [None, ""]:
-    log_sheet.append_row(["", "日時（JST）", "アクション", "詳細"])
+log_sheet.append_row(["", "日時（JST）", "アクション", "詳細"])
 
 def log(action, memo=""):
     # A列は空欄にしてB列から記録（B2スタート）
@@ -60,15 +72,22 @@ def log(action, memo=""):
 def list_pdfs_recursive(folder_id):
     pdfs = []
     q = f"'{folder_id}' in parents and trashed=false"
-    res = drive.files().list(
-        q=q,
-        fields="files(id, name, mimeType, size)",
-    ).execute()
-    for f in res.get("files", []):
-        if f["mimeType"] == "application/pdf":
-            pdfs.append(f)
-        elif f["mimeType"] == "application/vnd.google-apps.folder":
-            pdfs.extend(list_pdfs_recursive(f["id"]))
+    page_token = None
+    while True:
+        res = drive.files().list(
+            q=q,
+            fields="nextPageToken, files(id, name, mimeType, size)",
+            pageSize=1000,       # 最大1000件ずつ取得
+            pageToken=page_token,
+        ).execute()
+        for item in res.get("files", []):
+            if item["mimeType"] == "application/pdf":
+                pdfs.append(item)
+            elif item["mimeType"] == "application/vnd.google-apps.folder":
+                pdfs.extend(list_pdfs_recursive(item["id"]))
+        page_token = res.get("nextPageToken")
+        if not page_token:
+            break
     return pdfs
 
 def flatten_pdf(input_path, output_path):
