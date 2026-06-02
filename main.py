@@ -1,7 +1,7 @@
 import os
 import re
 import json
-import subprocess                          # ← Ghostscript呼び出しに必要
+import subprocess
 import fitz
 from datetime import datetime, timezone, timedelta
 import gspread
@@ -98,68 +98,126 @@ def list_pdfs_recursive(folder_id):
     return pdfs
 
 
+def open_pdf_and_get_target(input_path):
+    """
+    PDFを開いてページ数を確認し、0なら修復を試みる。
+
+    GASの normalizePdfLinks() が追記する増分更新の trailer に
+    '/Size 9999' のような異常値が入ることで PyMuPDF がページ数0と
+    誤認識する問題に対処する。
+
+    修復方法:
+      1つ目の %%EOF までのバイト列を stream として開き直すことで
+      増分更新部分を無視した正常な PDF として読み込む。
+
+    戻り値:
+      (target_path, repaired_path)
+        target_path  : 以後の処理で使う PDF パス
+        repaired_path: 修復一時ファイルのパス（修復不要なら None）
+                       → 呼び出し元の finally で必ず削除すること
+    """
+    # まず通常オープン
+    src = fitz.open(input_path)
+    if len(src) > 0:
+        src.close()
+        return input_path, None   # 修復不要
+
+    src.close()
+
+    # ページ数0 → 1つ目の %%EOF までで切り出して stream として開く
+    with open(input_path, "rb") as f:
+        data = f.read()
+
+    first_eof = data.find(b"%%EOF")
+    if first_eof == -1:
+        raise ValueError("%%EOF が見つかりません。PDFが壊れています: " + input_path)
+
+    data_trimmed = data[:first_eof + 5]
+    src = fitz.open(stream=data_trimmed, filetype="pdf")
+
+    if len(src) == 0:
+        src.close()
+        raise ValueError("PDFにページが存在しません（修復後も0ページ）: " + input_path)
+
+    # 修復済みファイルとして保存
+    repaired_path = input_path + ".__repaired__.pdf"
+    src.save(repaired_path, garbage=4, deflate=True, clean=True)
+    src.close()
+
+    return repaired_path, repaired_path   # target と repaired は同じパス
+
+
 def flatten_pdf(input_path, output_path):
     """
     Ghostscript でレンダリングしてアノテーションを焼き付ける。
     PyMuPDF の ExtGState 欠損エラー（AFSE6, GState8 等）を回避できる。
+    増分更新の /Size 異常値によるページ数0エラーにも対処済み。
 
     手順:
-      ① PyMuPDF でリンク情報とページサイズを取得
-      ② Ghostscript で全ページを PNG にレンダリング
-      ③ PNG を元サイズの新規 PDF に組み立て
-      ④ PyMuPDF でリンクを再付与して保存
+      ① PDF を開く（増分更新 /Size 異常値でページ数0の場合は修復して再試行）
+      ② PyMuPDF でリンク情報とページサイズを取得
+      ③ Ghostscript で全ページを PNG にレンダリング
+      ④ PNG を元サイズの新規 PDF に組み立て
+      ⑤ PyMuPDF でリンクを再付与して保存
     """
-    work_dir = os.path.dirname(os.path.abspath(output_path))
+    work_dir      = os.path.dirname(os.path.abspath(output_path))
+    repaired_path = None
 
-    # ① リンク・ページサイズを先に取得
-    src             = fitz.open(input_path)
-    links_per_page  = []
-    rects_per_page  = []
-    total_links     = 0
-    for page in src:
-        lks = page.get_links()
-        links_per_page.append(lks)
-        rects_per_page.append(page.rect)
-        total_links += len(lks)
-    page_count = len(src)
-    src.close()
+    try:
+        # ① PDF を開く（必要なら修復）
+        target_path, repaired_path = open_pdf_and_get_target(input_path)
 
-    if page_count == 0:
-        raise ValueError("PDFにページが存在しません")
+        # ② リンク・ページサイズを取得
+        src            = fitz.open(target_path)
+        links_per_page = []
+        rects_per_page = []
+        total_links    = 0
+        for page in src:
+            lks = page.get_links()
+            links_per_page.append(lks)
+            rects_per_page.append(page.rect)
+            total_links += len(lks)
+        page_count = len(src)
+        src.close()
 
-    # ② Ghostscript で PNG に変換（連番: gs_page_0001.png, 0002.png ...）
-    png_pattern = os.path.join(work_dir, "gs_page_%04d.png")
-    gs_cmd = [
-        "gs",
-        "-dBATCH", "-dNOPAUSE", "-dSAFER", "-dQUIET",
-        "-sDEVICE=png16m",
-        "-r" + str(DPI),
-        "-sOutputFile=" + png_pattern,
-        input_path,
-    ]
-    result = subprocess.run(gs_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError("Ghostscriptエラー:\n" + result.stderr)
+        # ③ Ghostscript で PNG に変換（連番: gs_page_0001.png, 0002.png ...）
+        png_pattern = os.path.join(work_dir, "gs_page_%04d.png")
+        gs_cmd = [
+            "gs",
+            "-dBATCH", "-dNOPAUSE", "-dSAFER", "-dQUIET",
+            "-sDEVICE=png16m",
+            "-r" + str(DPI),
+            "-sOutputFile=" + png_pattern,
+            target_path,          # 修復済みファイル（あれば）を渡す
+        ]
+        result = subprocess.run(gs_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError("Ghostscriptエラー:\n" + result.stderr)
 
-    # ③ PNG を PDF に組み立て（Ghostscript は 1 始まり連番）
-    dst = fitz.open()
-    for i in range(page_count):
-        png_path = os.path.join(work_dir, "gs_page_{:04d}.png".format(i + 1))
-        if not os.path.exists(png_path):
-            raise FileNotFoundError("PNGが見つかりません: " + png_path)
+        # ④ PNG を PDF に組み立て（Ghostscript は 1 始まり連番）
+        dst = fitz.open()
+        for i in range(page_count):
+            png_path = os.path.join(work_dir, "gs_page_{:04d}.png".format(i + 1))
+            if not os.path.exists(png_path):
+                raise FileNotFoundError("PNGが見つかりません: " + png_path)
 
-        orig_rect = rects_per_page[i]
-        dst_page  = dst.new_page(width=orig_rect.width, height=orig_rect.height)
-        dst_page.insert_image(orig_rect, filename=png_path)
-        os.remove(png_path)     # 使い終わったPNGを即削除してディスク節約
+            orig_rect = rects_per_page[i]
+            dst_page  = dst.new_page(width=orig_rect.width, height=orig_rect.height)
+            dst_page.insert_image(orig_rect, filename=png_path)
+            os.remove(png_path)   # 使い終わったPNGを即削除してディスク節約
 
-    # ④ リンクを再付与
-    for i, links in enumerate(links_per_page):
-        for link in links:
-            dst[i].insert_link(link)
+        # ⑤ リンクを再付与
+        for i, links in enumerate(links_per_page):
+            for link in links:
+                dst[i].insert_link(link)
 
-    dst.save(output_path, garbage=4, deflate=True)
-    dst.close()
+        dst.save(output_path, garbage=4, deflate=True)
+        dst.close()
+
+    finally:
+        # 修復用一時ファイルを必ず削除（エラー時も）
+        if repaired_path and os.path.exists(repaired_path):
+            os.remove(repaired_path)
 
     return total_links
 
